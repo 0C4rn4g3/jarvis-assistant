@@ -18,10 +18,12 @@ Window {
     visible: startShown
     title: "Jarvis"
     color: "transparent"
-    flags: Qt.Window | Qt.FramelessWindowHint
+    property bool pinned: false
+    flags: Qt.Window | Qt.FramelessWindowHint | (pinned ? Qt.WindowStaysOnTopHint : 0)
+    onPinnedChanged: win.visible = true
 
-    function present() { show(); raise(); requestActivate() }
-    function go(key) { page = key }
+    function present() { win.visible = true; show(); raise(); requestActivate() }
+    function go(key) { page = key; if (key === "home") home.reload() }
     Component.onCompleted: Api.get("/api/settings", d => { win.needsSetup = !d.settings.setup_done; Theme.scale = d.settings.text_size || 1 })
 
     Connections {
@@ -34,7 +36,10 @@ Window {
     Shortcut { sequence: "Ctrl+1"; onActivated: win.go("home") }
     Shortcut { sequence: "Ctrl+2"; onActivated: win.go("chats") }
     Shortcut { sequence: "Ctrl+,"; onActivated: win.go("settings") }
+    Shortcut { sequence: "F9"; onActivated: win.pinned = !win.pinned }
+    Shortcut { sequence: "Ctrl+Shift+P"; onActivated: win.pinned = !win.pinned }
     Shortcut { sequence: "Escape"; enabled: Backend.state !== "idle"; onActivated: Backend.stop() }
+
 
     onPageChanged: pageIn.restart()
 
@@ -88,26 +93,26 @@ Window {
             id: rail
             floating: true
             x: 12; y: 12
-            width: 76; height: parent.height - 24
-            radius: 26
+            width: 72; height: parent.height - 24
+            radius: 20
 
             DragHandler { target: null; onActiveChanged: if (active) win.startSystemMove() }
 
             ColumnLayout {
-                anchors { fill: parent; topMargin: 14; bottomMargin: 6 }
-                spacing: 2
+                anchors { fill: parent; topMargin: 12; bottomMargin: 8 }
+                spacing: 4
 
                 Orb {
                     Layout.alignment: Qt.AlignHCenter
-                    Layout.preferredWidth: 48; Layout.preferredHeight: 48
+                    Layout.preferredWidth: 46; Layout.preferredHeight: 46
                     mode: Backend.state
                     level: Backend.level
                     rings: false
                     TapHandler { onTapped: Backend.talk() }
                     HoverHandler { cursorShape: Qt.PointingHandCursor }
                 }
-                Rectangle { Layout.alignment: Qt.AlignHCenter; Layout.preferredWidth: 28; Layout.preferredHeight: 1
-                            Layout.topMargin: 10; Layout.bottomMargin: 10; color: Theme.stroke }
+                Rectangle { Layout.alignment: Qt.AlignHCenter; Layout.preferredWidth: 32; Layout.preferredHeight: 1
+                            Layout.topMargin: 8; Layout.bottomMargin: 8; color: Theme.stroke }
 
                 Repeater {
                     model: [["home", "Home", "home"], ["chats", "Chats", "chats"], ["activity", "Activity", "activity"],
@@ -137,7 +142,10 @@ Window {
                     anchors.fill: parent
                     currentIndex: ["home", "chats", "activity", "accounts", "plugins", "models", "memory", "settings", "health"].indexOf(win.page)
                     HomePage { id: home }
-                    Loader { active: win.page === "chats" || item; sourceComponent: ChatsPage { onOpened: { home.reload(); win.go("home") } } }
+                    Loader { active: win.page === "chats" || item; sourceComponent: ChatsPage {
+                        onOpened: { home.reload(); win.go("home") }
+                        onDeleted: id => { home.reload() }
+                    } }
                     Loader { active: win.page === "activity" || item; sourceComponent: ActivityPage {} }
                     Loader { active: win.page === "accounts" || item; sourceComponent: AccountsPage {} }
                     Loader { active: win.page === "plugins" || item; sourceComponent: PluginsPage {} }
@@ -168,21 +176,46 @@ Window {
             }
         }
 
-        Item {  // the top strip: drag to move, window buttons on the right (over the setup screen too)
+        Item {  // the top strip: drag to move, ModeSelector on left, window buttons on right
             id: top
             anchors { left: rail.right; right: parent.right; top: parent.top }
-            height: 46
+            height: 48
             z: 5.5
             DragHandler { target: null; onActiveChanged: if (active) win.startSystemMove() }
             TapHandler { onDoubleTapped: win.maximized ? win.showNormal() : win.showMaximized() }
-            Row {
-                anchors { right: parent.right; rightMargin: 12; top: parent.top; topMargin: 12 }
-                spacing: 4
-                WinButton { symbol: "min"; tip: "Minimise"; onClicked: win.showMinimized() }
-                WinButton { symbol: win.maximized ? "restore" : "max"; tip: win.maximized ? "Restore" : "Maximise"
-                            onClicked: win.maximized ? win.showNormal() : win.showMaximized() }
-                WinButton { symbol: "close"; danger: true; tip: "Close (Jarvis keeps running in the tray)"; onClicked: win.hide() }
+
+            // subtle bottom hairline divider
+            Rectangle {
+                anchors { left: parent.left; right: parent.right; bottom: parent.bottom }
+                height: 1
+                color: Theme.stroke
             }
+
+            ModeSelector {
+                id: modeSel
+                anchors { left: parent.left; leftMargin: 16; verticalCenter: parent.verticalCenter }
+            }
+
+            RowLayout {
+                anchors { right: parent.right; rightMargin: 16; verticalCenter: parent.verticalCenter }
+                spacing: 12
+
+                WinButton {
+                    symbol: "pin"
+                    tip: win.pinned ? "Unpin window" : "Pin on top (Gaming HUD)"
+                    active: win.pinned
+                    onClicked: win.pinned = !win.pinned
+                }
+
+                Rectangle {
+                    Layout.preferredWidth: 1; Layout.preferredHeight: 18
+                    color: Theme.stroke
+                    Layout.alignment: Qt.AlignVCenter
+                }
+
+                TrafficLightGroup {}
+            }
+
         }
 
 
@@ -213,31 +246,113 @@ Window {
         property string symbol
         readonly property bool current: win.page === key
         Layout.alignment: Qt.AlignHCenter
-        Layout.preferredWidth: 64
-        Layout.preferredHeight: 56
-        Layout.maximumHeight: 56
-        Layout.minimumHeight: 44
+        Layout.preferredWidth: 60
+        Layout.preferredHeight: 52
+        Layout.maximumHeight: 52
+        Layout.minimumHeight: 42
         Layout.fillHeight: true  // (so it can shrink in a short window)
         hoverEnabled: true
         focusPolicy: Qt.NoFocus
         onClicked: win.go(key)
         background: Rectangle {
-            radius: 16
+            radius: 14
             color: rb.current ? Theme.accentSoft : rb.hovered ? Theme.glassHover : "transparent"
+            border.width: 1
+            border.color: rb.current ? Theme.alpha(Theme.accent, 0.45) : rb.hovered ? Theme.stroke : "transparent"
             Behavior on color { ColorAnimation { duration: Theme.fast } }
+            Behavior on border.color { ColorAnimation { duration: Theme.fast } }
+
+            // Active indicator vertical pill on left edge
+            Rectangle {
+                visible: rb.current
+                anchors { left: parent.left; leftMargin: 3; verticalCenter: parent.verticalCenter }
+                width: 3; height: 16; radius: 1.5
+                color: Theme.accent
+            }
         }
         contentItem: Item {
             Column {
                 anchors.centerIn: parent
-                spacing: 4
-                Icon { anchors.horizontalCenter: parent.horizontalCenter; name: rb.symbol; size: 20
+                spacing: 3
+                Icon { anchors.horizontalCenter: parent.horizontalCenter; name: rb.symbol; size: 19
                        color: rb.current ? Theme.accent : rb.hovered ? Theme.text : Theme.text2 }
-                Text { anchors.horizontalCenter: parent.horizontalCenter; text: rb.label; font.family: Theme.font; font.pixelSize: Theme.px(11)
-                       font.variableAxes: { "wght": rb.current ? 600 : 500 }; color: rb.current ? Theme.text : rb.hovered ? Theme.text : Theme.text2 }
+                Text { anchors.horizontalCenter: parent.horizontalCenter; text: rb.label; font.family: Theme.font; font.pixelSize: Theme.px(10.5)
+                       font.variableAxes: { "wght": rb.current ? 650 : 500 }; color: rb.current ? Theme.text : rb.hovered ? Theme.text : Theme.text2 }
             }
         }
-        scale: down ? 0.97 : 1
+        scale: down ? 0.95 : rb.hovered ? 1.02 : 1
         Behavior on scale { NumberAnimation { duration: Theme.fast; easing.type: Easing.OutCubic } }
+    }
+
+    component TrafficLightGroup: Row {
+        id: tlg
+        spacing: 8
+        Layout.alignment: Qt.AlignVCenter
+        property bool hoveredGroup: closeBtn.hovered || minBtn.hovered || maxBtn.hovered
+
+        TrafficButton {
+            id: closeBtn
+            baseColor: Theme.trafficRed
+            strokeColor: Theme.trafficStrokeRed
+            glyphColor: "#4f0004"
+            symbol: "close"
+            tip: "Close (Jarvis keeps running in the tray)"
+            groupHovered: tlg.hoveredGroup
+            onClicked: win.hide()
+        }
+        TrafficButton {
+            id: minBtn
+            baseColor: Theme.trafficYellow
+            strokeColor: Theme.trafficStrokeYellow
+            glyphColor: "#563800"
+            symbol: "min"
+            tip: "Minimise"
+            groupHovered: tlg.hoveredGroup
+            onClicked: win.showMinimized()
+        }
+        TrafficButton {
+            id: maxBtn
+            baseColor: Theme.trafficGreen
+            strokeColor: Theme.trafficStrokeGreen
+            glyphColor: "#02420a"
+            symbol: win.maximized ? "restore" : "max"
+            tip: win.maximized ? "Restore" : "Maximise"
+            groupHovered: tlg.hoveredGroup
+            onClicked: win.maximized ? win.showNormal() : win.showMaximized()
+        }
+    }
+
+    component TrafficButton: AbstractButton {
+        id: tb
+        property color baseColor
+        property color strokeColor
+        property color glyphColor
+        property string symbol
+        property string tip
+        property bool groupHovered: false
+        implicitWidth: 16; implicitHeight: 16
+        hoverEnabled: true
+        focusPolicy: Qt.NoFocus
+        Tip { text: tb.tip; visible: tb.hovered }
+        background: Rectangle {
+            anchors.fill: parent
+            radius: 8
+            color: tb.baseColor
+            border.width: 1
+            border.color: tb.strokeColor
+        }
+        contentItem: Item {
+            Icon {
+                anchors.centerIn: parent
+                name: tb.symbol
+                size: 8
+                color: tb.glyphColor
+                opacity: tb.groupHovered ? 0.9 : 0
+                Behavior on opacity { NumberAnimation { duration: Theme.fast } }
+            }
+        }
+        scale: down ? 0.92 : 1
+        Behavior on scale { NumberAnimation { duration: Theme.fast } }
     }
 
     component WinButton: AbstractButton {
@@ -245,17 +360,24 @@ Window {
         property string symbol
         property string tip
         property bool danger: false
-        implicitWidth: 30; implicitHeight: 30
+        property bool active: false
+        implicitWidth: 32; implicitHeight: 32
         hoverEnabled: true
         focusPolicy: Qt.NoFocus
         Tip { text: wb.tip; visible: wb.hovered }
         background: Rectangle {
-            radius: 15
-            color: !wb.hovered ? "transparent" : wb.danger ? Theme.alpha(Theme.red, 0.8) : Theme.glassHover
+            radius: 16
+            color: wb.active ? Theme.accentSoft : wb.hovered ? Theme.glassHover : "transparent"
+            border.width: 1
+            border.color: wb.active ? Theme.alpha(Theme.accent, 0.45) : wb.hovered ? Theme.stroke : "transparent"
             Behavior on color { ColorAnimation { duration: Theme.fast } }
+            Behavior on border.color { ColorAnimation { duration: Theme.fast } }
         }
         contentItem: Item {
-            Icon { anchors.centerIn: parent; name: wb.symbol; size: 16; color: wb.hovered ? (wb.danger ? "white" : Theme.text) : Theme.text3 }
+            Icon { anchors.centerIn: parent; name: wb.symbol; size: 15; color: wb.active ? Theme.accent : wb.hovered ? (wb.danger ? "white" : Theme.text) : Theme.text2 }
         }
+        scale: down ? 0.94 : 1
+        Behavior on scale { NumberAnimation { duration: Theme.fast } }
     }
+
 }

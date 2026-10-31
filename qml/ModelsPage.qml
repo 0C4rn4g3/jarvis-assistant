@@ -16,13 +16,13 @@ ScrollPage {
     property bool custom: false  // the add-a-provider row is open
 
     function load() {
-        Api.get("/api/models", d => info = d)
-        Api.get("/api/models/jobs", d => jobs = d)
+        Api.get("/api/models", d => page.info = d)
+        Api.get("/api/models/jobs", d => page.jobs = d)
         lookUp()
     }
     function lookUp() {
         looking = true
-        Api.get("/api/models/available", d => { avail = d; looking = false }, e => { looking = false; Backend.toast(e.error, true) })
+        Api.get("/api/models/available", d => { page.avail = d; page.looking = false }, e => { page.looking = false; Backend.toast(e.error, true) })
     }
     function save(job, list) {
         const change = {}
@@ -285,6 +285,7 @@ ScrollPage {
                 required property string modelData
                 required property int index
                 readonly property var parts: modelData.split(/\s+/)
+                property bool custom: page.modelsOf(row.parts[0]).length === 0 || page.modelsOf(row.parts[0]).indexOf(row.parts[1]) < 0
                 Layout.fillWidth: true
                 spacing: 8
                 Rectangle {  // its place in the order
@@ -296,11 +297,14 @@ ScrollPage {
                 }
                 Select { Layout.preferredWidth: 150; model: page.options(page.usableBackends(), row.parts[0]); value: row.parts[0]
                          onPicked: v => list.update(row.index, [v, page.modelsOf(v)[0] || row.parts[1], row.parts[2]]) }
-                Select { Layout.fillWidth: true; visible: page.modelsOf(row.parts[0]).length > 0
+                Select { Layout.fillWidth: true; visible: !row.custom && page.modelsOf(row.parts[0]).length > 0
                          model: page.options(page.modelsOf(row.parts[0]), row.parts[1]); value: row.parts[1]
                          onPicked: v => list.update(row.index, [row.parts[0], v, row.parts[2]]) }
-                Field { Layout.fillWidth: true; visible: !page.modelsOf(row.parts[0]).length; text: row.parts[1]; placeholderText: "model name"
+                Field { Layout.fillWidth: true; visible: row.custom || !page.modelsOf(row.parts[0]).length; text: row.parts[1]; placeholderText: "e.g. gemini-argon"
                         onEditingFinished: if (text && text !== row.parts[1]) list.update(row.index, [row.parts[0], text.trim(), row.parts[2]]) }
+                IconButton { symbol: row.custom ? "refresh" : "wrench"; size: 32; glyph: 15; color: row.custom ? Theme.accent : Theme.text3
+                             tip: row.custom ? "Pick from model list" : "Type custom model name (e.g. gemini-argon)"
+                             onClicked: row.custom = !row.custom }
                 Select { Layout.preferredWidth: 120; model: page.options(list.thinking, row.parts[2]); value: row.parts[2]
                          onPicked: v => list.update(row.index, [row.parts[0], row.parts[1], v]) }
                 IconButton { symbol: "chevron"; rotation: 180; size: 32; glyph: 16; color: Theme.text3; tip: "Try this one sooner"

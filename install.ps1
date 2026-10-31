@@ -15,16 +15,23 @@ uv pip install -q --python .venv\Scripts\python.exe --no-deps openwakeword  # (i
 $config = Join-Path $env:APPDATA "Jarvis"
 New-Item -ItemType Directory -Force $config | Out-Null
 
-# Start Menu shortcut; pythonw runs it without a console window
-$shortcut = (New-Object -ComObject WScript.Shell).CreateShortcut((Join-Path ([Environment]::GetFolderPath("Programs")) "Jarvis.lnk"))
-$shortcut.TargetPath = (Resolve-Path .venv\Scripts\pythonw.exe).Path
-$shortcut.Arguments = "`"$PSScriptRoot\jarvis.py`""
-$shortcut.WorkingDirectory = $PSScriptRoot
-$shortcut.IconLocation = "$PSScriptRoot\icon.ico"
-$shortcut.Description = 'Voice assistant (say "Hey Jarvis")'
-$shortcut.Save()
+# Start Menu and Desktop shortcuts; pythonw runs it without a console window
+$wsh = New-Object -ComObject WScript.Shell
+foreach ($loc in @([Environment]::GetFolderPath("Programs"), [Environment]::GetFolderPath("Desktop"))) {
+    $shortcut = $wsh.CreateShortcut((Join-Path $loc "Jarvis.lnk"))
+    $shortcut.TargetPath = (Resolve-Path .venv\Scripts\pythonw.exe).Path
+    $shortcut.Arguments = "`"$PSScriptRoot\jarvis.py`""
+    $shortcut.WorkingDirectory = $PSScriptRoot
+    $shortcut.IconLocation = "$PSScriptRoot\icon.ico"
+    $shortcut.Description = 'Voice assistant (say "Hey Jarvis")'
+    $shortcut.Save()
+}
 
 if (-not (Test-Path (Join-Path $config "env"))) {
-    Write-Host "Next: put your Google AI Studio key in $config\env as  GEMINI_API_KEY=..."
+    # Copy the template so the user has a ready-to-fill file in the right place.
+    Copy-Item (Join-Path $PSScriptRoot "env.example") (Join-Path $config "env")
+    Write-Host "Next: open $config\env and fill in your Google AI Studio key (GEMINI_API_KEY=...)."
+    Write-Host "      Get a free key at https://aistudio.google.com/apikey"
 }
 Write-Host "Installed. Start Jarvis from the Start Menu (Jarvis)."
+Write-Host "Tip:  For CLI commands (--task, --say, --mcp) use .\jarvis-cli.ps1 instead of the shortcut."

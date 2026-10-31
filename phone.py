@@ -45,6 +45,59 @@ def token_hash(token):
     return hashlib.sha256(str(token).encode()).hexdigest()
 
 
+def get_active_thread_context() -> dict:
+    """Gathers desktop/Unity state, active game project, and recent conversation so phone can pick up mid-sentence."""
+    import system
+    app = system.active_app() or "Desktop"
+    is_gaming = False
+    try:
+        import hardware
+        is_gaming = hardware.is_gaming_active()
+    except Exception:
+        pass
+
+    game_info = {}
+    try:
+        import game_design
+        game_info = game_design.get_active_project() or {}
+    except Exception:
+        pass
+
+    recent_dialogue = []
+    try:
+        import jarvis
+        for m in reversed(jarvis.sessions.messages):
+            if m.get("who") in ("you", "jarvis") and m.get("text"):
+                who_label = "User" if m["who"] == "you" else "Jarvis"
+                recent_dialogue.insert(0, f"{who_label}: {m['text']}")
+                if len(recent_dialogue) >= 6:
+                    break
+    except Exception:
+        pass
+
+    clipboard_snippet = ""
+    try:
+        import clipboard_daemon
+        entries = clipboard_daemon.list_clipboard_history(limit=1)
+        if entries:
+            clipboard_snippet = entries[0]["text"][:160]
+    except Exception:
+        pass
+
+    return {
+        "ok": True,
+        "active_app": app,
+        "is_gaming": is_gaming,
+        "active_game": game_info.get("name", "Unknown Game"),
+        "game_engine": game_info.get("engine", "Unity"),
+        "game_genre": game_info.get("genre", ""),
+        "game_summary": game_info.get("summary", ""),
+        "recent_thread": recent_dialogue,
+        "clipboard_snippet": clipboard_snippet,
+        "synced_at": time.time()
+    }
+
+
 class Channel:
     """One encrypted conversation: a key and a frame counter each way."""
 
@@ -96,8 +149,8 @@ def connect(pc_key):
 
 
 class PhoneLink:
-    def __init__(self, brain, notify=print):
-        self.brain, self.notify = brain, notify
+    def __init__(self, brain, notify=print, emitter=None):
+        self.brain, self.notify, self.emitter = brain, notify, emitter
         self.state = store.read_json(STATE_FILE, {})
         if not self.state.get("sign"):
             pem = lambda: ec.generate_private_key(ec.SECP256R1()).private_bytes(
@@ -265,10 +318,228 @@ class PhoneLink:
         elif op == "stop":
             self.brain.interrupt()
             await self._send(c, {"op": "stopped"})
+        elif op == "clipboard_push":
+            clip_text = str(m.get("text", "")).strip()
+            if clip_text:
+                try:
+                    import clipboard_daemon
+                    clipboard_daemon.record_clipboard_entry(clip_text, app_source="PhoneLink")
+                    import win32clipboard, win32con
+                    win32clipboard.OpenClipboard()
+                    win32clipboard.EmptyClipboard()
+                    win32clipboard.SetClipboardText(clip_text, win32con.CF_UNICODETEXT)
+                    win32clipboard.CloseClipboard()
+                    self.notify(f"📋 Synced from Phone: {clip_text[:40]}...")
+                except Exception as e:
+                    print(f"[phone] clipboard_push failed: {e}", flush=True)
+            return await self._send(c, {"op": "clipboard_ack"})
+        elif op == "clipboard_pull":
+            import clipboard_daemon
+            entries = clipboard_daemon.list_clipboard_history(limit=1)
+            text = entries[0]["text"] if entries else ""
+            return await self._send(c, {"op": "clipboard_sync", "text": text})
+        elif op == "continue_session":
+            curr = self.brain.sessions.current if hasattr(self.brain, "sessions") else {}
+            return await self._send(c, {"op": "session_handoff", "conversation": curr})
+        elif op == "get_today":
+            import system, store, hardware, lead_hunter, jev
+            media = system.now_playing() or {}
+            reminders = store.reminders()
+            stats = system.system_stats() if hasattr(system, "system_stats") else {}
+            vram = hardware.arbitrate_vram()
+            checks_stamp = os.path.join(store.DATA, "checks.json")
+            stamp = store.read_json(checks_stamp, {}) if hasattr(store, "read_json") else {}
+            jobs = {"text": stamp.get("latest", ""), "time": stamp.get("time", "")}
+            raw_leads = lead_hunter.get_saved_leads()[:15]
+            leads_data = [{
+                "name": l.get("name", ""),
+                "url": l.get("url", ""),
+                "maps_url": l.get("maps_url", ""),
+                "score": l.get("traction_score", 0),
+                "issues": l.get("issues", [])[:2],
+                "phone": l.get("phone", "")
+            } for l in raw_leads]
+            today_data = {
+                "op": "today_sync",
+                "thread_context": get_active_thread_context(),
+                "media": media,
+                "reminders": [{
+                    "text": r.get("text", ""),
+                    "at": r.get("at", 0),
+                    "when": time.strftime("%H:%M", time.localtime(r.get("at", time.time())))
+                } for r in reminders[:5]],
+                "stats": {
+                    "cpu": stats.get("cpu", 0),
+                    "ram_used_gb": round(stats.get("ram_used", 0) / 1073741824, 1),
+                    "ram_total_gb": round(stats.get("ram_total", 0) / 1073741824, 1),
+                    "gaming": vram.get("gaming_active", False)
+                },
+                "jobs": jobs,
+                "leads": leads_data,
+                "jev": jev.status(),
+                "subagents": (lambda: (__import__("subagents").get_subagent_manager().get_status_summary()))()
+            }
+            return await self._send(c, today_data)
+        elif op == "scan_leads":
+            import lead_hunter
+            niche = str(m.get("niche", "dental clinic")).strip()
+            location = str(m.get("location", "")).strip()
+            def run_scan():
+                res = lead_hunter.scan_leads(niche=niche, location=location, limit=15, send_phone=True)
+                raw_leads = res.get("leads", [])
+                leads_data = [{
+                    "name": l.get("name", ""),
+                    "url": l.get("url", ""),
+                    "maps_url": l.get("maps_url", ""),
+                    "score": l.get("traction_score", 0),
+                    "issues": l.get("issues", [])[:2],
+                    "phone": l.get("phone", "")
+                } for l in raw_leads]
+                self._call(self._send(c, {"op": "today_sync", "leads": leads_data}))
+            threading.Thread(target=run_scan, daemon=True).start()
+            return await self._send(c, {"op": "working", "queued": False})
+        elif op == "media_action":
+            import system
+            action = m.get("action", "PlayPause")
+            try:
+                system.media(action)
+            except Exception:
+                pass
+            media = system.now_playing() or {}
+            return await self._send(c, {"op": "today_sync", "media": media})
+        elif op == "geofence_trigger":
+            event = str(m.get("event", "enter")).lower()
+            if event in ("enter", "near_home", "home"):
+                self.notify("📍 Phone entered Home Geofence: Welcome home!")
+                system.keep_system_awake(False)
+                try:
+                    import jarvis
+                    jarvis.notch_line[:] = ["📍 Phone near home: Session active", time.time()]
+                except Exception:
+                    pass
+                return await self._send(c, {"op": "geofence_ack", "action": "home_active", "status": "PC Awake"})
+            elif event in ("exit", "leaving", "away"):
+                if store.settings().get("keep_awake_when_away", True):
+                    system.keep_system_awake(True)
+                if store.settings().get("lock_on_away", False) and system.IS_WINDOWS:
+                    import ctypes
+                    try:
+                        ctypes.windll.user32.LockWorkStation()
+                    except Exception:
+                        pass
+                import operators
+                op_count = len(operators.get_operator_manager().list_operators())
+                self.notify("📍 Away from Home: PC awake & ready for remote phone access.")
+                try:
+                    import jarvis
+                    jarvis.notch_line[:] = ["📱 Remote Phone Active: Standby & Listening", time.time()]
+                except Exception:
+                    pass
+                return await self._send(c, {
+                    "op": "geofence_ack",
+                    "action": "remote_active",
+                    "status": f"PC awake & ready for phone control. {op_count} operators running."
+                })
+        elif op == "spawn_subagent":
+            import subagents
+            task = str(m.get("task", "")).strip()
+            cat = str(m.get("category", "general")).strip()
+            if not task:
+                return await self._send(c, {"op": "error", "message": "task is required"})
+            sub = subagents.get_subagent_manager(brain=self.brain).spawn(task, category=cat, brain=self.brain)
+            return await self._send(c, {"op": "subagent_spawned", "id": sub.id, "task": sub.task, "category": sub.category})
+        elif op == "cancel_subagent":
+            import subagents
+            sub_id = str(m.get("id", "")).strip()
+            ok = subagents.get_subagent_manager().cancel(sub_id)
+            return await self._send(c, {"op": "subagent_cancelled", "id": sub_id, "ok": ok})
+        elif op == "list_subagents":
+            import subagents
+            return await self._send(c, {"op": "subagents_list", "subagents": subagents.get_subagent_manager().list_subagents()})
+        elif op == "screen_peek":
+            try:
+                jpeg = system.screen_peek_jpeg()
+                if jpeg:
+                    b64_frame = base64.b64encode(jpeg).decode()
+                    return await self._send(c, {
+                        "op": "screen_frame",
+                        "frame": b64_frame,
+                        "timestamp": time.time()
+                    })
+            except Exception as e:
+                return await self._send(c, {"op": "screen_frame", "error": str(e)})
+        elif op == "thread_context":
+            return await self._send(c, {
+                "op": "thread_context",
+                "context": get_active_thread_context()
+            })
+        elif op == "camera_scan":
+            import camera_bridge
+            img_b64 = str(m.get("image", "")).strip()
+            prompt = str(m.get("prompt", "")).strip()
+            mode = str(m.get("mode", "auto")).strip()
+            req_id = m.get("id")
+            if not img_b64:
+                return await self._send(c, {"op": "error", "error": "image is required"})
+            await self._send(c, {"op": "working", "id": req_id, "queued": False})
+
+            def _process():
+                try:
+                    emitter_fn = self.emitter or (lambda k, **d: self.notify(d.get("text", "")))
+                    res = camera_bridge.process_camera_scan(
+                        img_b64, prompt=prompt, mode=mode,
+                        brain=self.brain, emitter=emitter_fn
+                    )
+                    reply_text = res.get("analysis", "Camera scan received.")
+                    self._call(self._send(c, {
+                        "op": "reply",
+                        "id": req_id,
+                        "text": reply_text,
+                        "file_path": res.get("file_path", "")
+                    }))
+                except Exception as e:
+                    print(f"[phone] camera_scan error: {e}", flush=True)
+                    self._call(self._send(c, {
+                        "op": "error",
+                        "id": req_id,
+                        "error": f"Camera scan failed: {e}"
+                    }))
+            threading.Thread(target=_process, daemon=True).start()
+            return
 
     def _task(self, device, request, text):
         try:
-            reply = self.brain.ask(REMOTE_NOTE + text, remote=True)
+            ctx = get_active_thread_context()
+            app = ctx.get("active_app", "PC")
+            game = ctx.get("active_game", "")
+            engine = ctx.get("game_engine", "Unity")
+            thread_lines = "\n".join(ctx.get("recent_thread", []))
+            clip = ctx.get("clipboard_snippet", "")
+
+            # Keep thread context compact for low mobile latency
+            compact_threads = ctx.get("recent_thread", [])[-3:]
+            thread_str = "\n".join(compact_threads)
+            carry_prompt = [
+                f"[MOBILE REMOTE] Foreground: {app} | Game: {game} ({engine})"
+            ]
+            if thread_str:
+                carry_prompt.append(f"Recent Dialogue:\n{thread_str}")
+            if clip and len(clip) < 100:
+                carry_prompt.append(f"PC Clipboard: \"{clip}\"")
+            carry_prompt.append(
+                f"User: {text}\n"
+                "Reply directly and concisely in 1-2 short sentences as plain text."
+            )
+            prompt = "\n".join(carry_prompt)
+            reply = self.brain.ask(prompt, remote=True)
+
+            # Bidirectional sync: record phone dialogue into desktop sessions
+            try:
+                import jarvis
+                jarvis.sessions.add({"who": "you", "text": f"[📱 Phone] {text}"})
+                jarvis.sessions.add({"who": "jarvis", "text": reply})
+            except Exception:
+                pass
         except Exception as e:
             reply = f"The task failed: {e}"
         self._call(self._deliver(device, {"op": "reply", "id": request, "text": reply}))
@@ -277,6 +548,24 @@ class PhoneLink:
         """Something Jarvis did or found on its own (a scheduled task, a check), sent to every paired phone."""
         for device in self.state["devices"]:
             self._call(self._deliver(device, {"op": "reply", "text": text}))
+
+    def push_clipboard(self, text: str):
+        """Beams PC clipboard content to all paired phone devices."""
+        for device in self.state["devices"]:
+            self._call(self._deliver(device, {"op": "clipboard_sync", "text": text}))
+
+    def beam_file_to_phone(self, file_path: str):
+        """Notifies paired phones about a file ready for transfer."""
+        if os.path.exists(file_path):
+            name = os.path.basename(file_path)
+            size = os.path.getsize(file_path)
+            for device in self.state["devices"]:
+                self._call(self._deliver(device, {
+                    "op": "file_beam",
+                    "filename": name,
+                    "size": size,
+                    "path": file_path
+                }))
 
     async def _deliver(self, device, message):
         c = next((c for c, p in self.phones.items() if p["device"] == device and p["channel"]), None)

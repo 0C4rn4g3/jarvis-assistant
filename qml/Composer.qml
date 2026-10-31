@@ -14,9 +14,9 @@ Glass {
     readonly property bool busy: Backend.state !== "idle"
     readonly property bool typed: input.text.trim() !== "" || attachments.length > 0
     floating: true
-    implicitHeight: Math.max(56, col.implicitHeight + 16)
-    radius: 28
-    border.color: input.activeFocus ? Theme.alpha(Theme.accent, 0.3) : Theme.stroke
+    implicitHeight: Math.max(54, col.implicitHeight + 14)
+    radius: 24
+    border.color: input.activeFocus ? Theme.alpha(Theme.accent, 0.45) : Theme.strokeStrong
     Behavior on border.color { ColorAnimation { duration: Theme.fast } }
 
     ColumnLayout {

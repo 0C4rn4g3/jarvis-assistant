@@ -25,6 +25,7 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
@@ -89,6 +90,7 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
@@ -111,6 +113,28 @@ enum class Who { YOU, JARVIS, PHONE, NOTE }
 
 data class Msg(val id: Int, val who: Who, val text: String)
 
+data class LeadItem(
+    val name: String = "",
+    val url: String = "",
+    val score: Int = 0,
+    val issues: List<String> = emptyList(),
+    val phone: String = "",
+    val mapsUrl: String = "",
+)
+
+data class TodayInfo(
+    val mediaTitle: String = "",
+    val mediaArtist: String = "",
+    val mediaStatus: String = "",
+    val reminders: List<String> = emptyList(),
+    val cpu: Int = 0,
+    val ramGb: String = "",
+    val gaming: Boolean = false,
+    val jobText: String = "",
+    val jobTime: String = "",
+    val leads: List<LeadItem> = emptyList(),
+)
+
 /** Everything the screens show: plain values, so they render the same from the app or from fake data. */
 data class Ui(
     val paired: Boolean = false,
@@ -122,6 +146,7 @@ data class Ui(
     val working: Boolean = false,
     val key: String = "",
     val version: String = "",
+    val today: TodayInfo = TodayInfo(),
 )
 
 class Actions(
@@ -132,6 +157,11 @@ class Actions(
     val pair: (String) -> Unit = {},
     val saveKey: (String) -> Unit = {},
     val unpair: () -> Unit = {},
+    val mediaAction: (String) -> Unit = {},
+    val refreshToday: () -> Unit = {},
+    val scanLeads: (String) -> Unit = {},
+    val cameraScan: () -> Unit = {},
+    val pickScan: () -> Unit = {},
 )
 
 @Composable
@@ -307,9 +337,9 @@ private fun Banner(ui: Ui, openSettings: () -> Unit) {
 }
 
 private val SUGGESTIONS = listOf(
+    Triple(Ico.camera, "Scan whiteboard / sketch", "Beam camera snap to PC"),
     Triple(Ico.calendar, "What's due soon?", "Classroom and calendar"),
     Triple(Ico.screen, "What's on my screen?", "A look at your PC"),
-    Triple(Ico.mute, "Mute my PC", "Volume and media"),
     Triple(Ico.mail, "Any new emails?", "Your inbox, summed up"),
 )
 
@@ -327,11 +357,215 @@ private fun Empty(ui: Ui, act: Actions) {
         Spacer(Modifier.height(8.dp))
         Text(if (ui.state == State.ONLINE) "Type or tap the mic. Your PC does the work." else "Ask anything. Jarvis answers as soon as it can.",
             J.body.copy(color = J.text2), align = TextAlign.Center)
-        Spacer(Modifier.height(36.dp))
+
+        // Today Dashboard Hub (Music, Up Next, PC Stats)
+        if (ui.today.mediaTitle.isNotBlank()) {
+            Spacer(Modifier.height(20.dp))
+            Row(
+                Modifier.fillMaxWidth().glass(RoundedCornerShape(20.dp)).padding(16.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Box(Modifier.size(44.dp).background(J.accentSoft, RoundedCornerShape(12.dp)), contentAlignment = Alignment.Center) {
+                    Icon(Ico.music, J.accent, 22.dp)
+                }
+                Spacer(Modifier.width(14.dp))
+                Column(Modifier.weight(1f)) {
+                    Text(ui.today.mediaTitle, J.button, maxLines = 1)
+                    if (ui.today.mediaArtist.isNotBlank()) {
+                        Text(ui.today.mediaArtist, J.small, maxLines = 1)
+                    }
+                }
+                Spacer(Modifier.width(8.dp))
+                Box(
+                    Modifier.size(38.dp).background(J.accentSoft, CircleShape).clickable { act.mediaAction("PlayPause") },
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(if (ui.today.mediaStatus == "Playing") Ico.pause else Ico.play, J.accent, 18.dp)
+                }
+            }
+        }
+
+        if (ui.today.reminders.isNotEmpty()) {
+            Spacer(Modifier.height(14.dp))
+            Column(
+                Modifier.fillMaxWidth().glass(RoundedCornerShape(20.dp)).padding(16.dp)
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Ico.calendar, J.accent, 16.dp)
+                    Spacer(Modifier.width(8.dp))
+                    Text("Up Next", J.heading)
+                }
+                Spacer(Modifier.height(10.dp))
+                ui.today.reminders.take(3).forEach { rem ->
+                    Text(rem, J.small.copy(color = J.text), maxLines = 2)
+                    Spacer(Modifier.height(4.dp))
+                }
+            }
+        }
+
+        if (ui.today.cpu > 0 || ui.today.gaming) {
+            Spacer(Modifier.height(14.dp))
+            Row(
+                Modifier.fillMaxWidth().glass(RoundedCornerShape(20.dp)).padding(14.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Ico.cpu, J.accent, 18.dp)
+                    Spacer(Modifier.width(8.dp))
+                    Text("PC: CPU ${ui.today.cpu}%  RAM ${ui.today.ramGb}", J.small.copy(fontWeight = FontWeight.Medium))
+                }
+                if (ui.today.gaming) {
+                    Text("⚡ Gaming VRAM", J.label.copy(color = J.warm))
+                } else {
+                    Text("Ready", J.label.copy(color = J.green))
+                }
+            }
+        }
+
+        if (ui.state == State.ONLINE) {
+            val uriHandler = LocalUriHandler.current
+            Spacer(Modifier.height(14.dp))
+            Column(
+                Modifier.fillMaxWidth().glass(RoundedCornerShape(20.dp)).padding(16.dp)
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Ico.radar, J.accent, 18.dp)
+                    Spacer(Modifier.width(8.dp))
+                    Text("Job Radar", J.heading)
+                    Spacer(Modifier.weight(1f))
+                    Text(if (ui.today.jobTime.isNotBlank()) "Updated ${ui.today.jobTime}" else "Daily radar", J.label.copy(color = J.text3))
+                }
+                Spacer(Modifier.height(10.dp))
+                Text(
+                    if (ui.today.jobText.isNotBlank()) ui.today.jobText else "Scan Bucharest game dev & Minecraft freelance listings.",
+                    J.small.copy(color = if (ui.today.jobText.isNotBlank()) J.text else J.text2, lineHeight = 18.sp)
+                )
+                Spacer(Modifier.height(12.dp))
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    listOf(
+                        "Glassdoor" to "https://www.glassdoor.com/Job/bucharest-game-developer-jobs-SRCH_IL.0,9_IC3278546_KO10,24.htm",
+                        "SpigotMC" to "https://www.spigotmc.org/forums/hiring-developers.55/",
+                        "LinkedIn" to "https://www.linkedin.com/jobs/search/?keywords=game%20developer%20bucharest"
+                    ).forEach { (name, url) ->
+                        Row(
+                            Modifier.glass(RoundedCornerShape(12.dp)).press { uriHandler.openUri(url) }.padding(horizontal = 10.dp, vertical = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(name, J.label.copy(color = J.accent))
+                            Spacer(Modifier.width(4.dp))
+                            Icon(Ico.external, J.accent, 12.dp)
+                        }
+                    }
+                }
+            }
+        }
+
+        // Lead Hunter Dashboard Hub
+        if (ui.state == State.ONLINE) {
+            val uriHandler = LocalUriHandler.current
+            var customNiche by remember { mutableStateOf("") }
+            Spacer(Modifier.height(14.dp))
+            Column(
+                Modifier.fillMaxWidth().glass(RoundedCornerShape(20.dp)).padding(16.dp)
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Ico.sparkle, J.accent, 18.dp)
+                    Spacer(Modifier.width(8.dp))
+                    Text("Lead Hunter Radar", J.heading)
+                    Spacer(Modifier.weight(1f))
+                    Text("Lowest Traction", J.label.copy(color = J.warm))
+                }
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    "Local businesses with missing web funnels & conversion leaks:",
+                    J.small.copy(color = J.text2, lineHeight = 17.sp)
+                )
+                Spacer(Modifier.height(10.dp))
+
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Field(customNiche, { customNiche = it }, "Search any niche or city...", Modifier.weight(1f), done = {
+                        if (customNiche.isNotBlank()) act.scanLeads(customNiche.trim())
+                    })
+                    Spacer(Modifier.width(8.dp))
+                    Box(
+                        Modifier.size(44.dp).glass(CircleShape).press {
+                            if (customNiche.isNotBlank()) act.scanLeads(customNiche.trim())
+                        },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(Ico.sparkle, J.accent, 18.dp)
+                    }
+                }
+                Spacer(Modifier.height(12.dp))
+
+                if (ui.today.leads.isNotEmpty()) {
+                    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        ui.today.leads.take(8).forEach { lead ->
+                            Row(
+                                Modifier.fillMaxWidth().glass(RoundedCornerShape(12.dp)).padding(10.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Column(Modifier.weight(1f)) {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Text(lead.name, J.button.copy(fontSize = 13.5.sp), maxLines = 1)
+                                        Spacer(Modifier.width(6.dp))
+                                        Box(
+                                            Modifier.clip(RoundedCornerShape(6.dp))
+                                                .background(if (lead.score <= 30) J.accentSoft else J.warm.copy(alpha = 0.2f))
+                                                .padding(horizontal = 6.dp, vertical = 2.dp)
+                                        ) {
+                                            Text(
+                                                "${lead.score}/100",
+                                                J.label.copy(color = if (lead.score <= 30) J.accent else J.warm, fontSize = 10.sp)
+                                            )
+                                        }
+                                    }
+                                    if (lead.issues.isNotEmpty()) {
+                                        Spacer(Modifier.height(2.dp))
+                                        Text(lead.issues.joinToString(" · "), J.label.copy(color = J.text3, fontSize = 11.sp), maxLines = 1)
+                                    }
+                                }
+                                val gmaps = lead.mapsUrl.ifBlank {
+                                    "https://www.google.com/maps/search/?api=1&query=" + java.net.URLEncoder.encode(lead.name + " Bucharest", "UTF-8")
+                                }
+                                Box(
+                                    Modifier.size(34.dp).glass(CircleShape).press {
+                                        uriHandler.openUri(gmaps)
+                                    },
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Icon(Ico.pin, J.accent, 16.dp)
+                                }
+                                if (lead.url.isNotBlank() && lead.url != "No Website") {
+                                    Spacer(Modifier.width(6.dp))
+                                    Box(
+                                        Modifier.size(34.dp).glass(CircleShape).press {
+                                            val full = if (lead.url.startsWith("http")) lead.url else "https://${lead.url}"
+                                            uriHandler.openUri(full)
+                                        },
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Icon(Ico.external, J.accent, 14.dp)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Spacer(Modifier.height(28.dp))
         SUGGESTIONS.chunked(2).forEach { row ->
             Row(Modifier.fillMaxWidth().height(IntrinsicSize.Min).padding(bottom = 12.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 row.forEach { (icon, title, sub) ->
-                    Column(Modifier.weight(1f).fillMaxHeight().glass(RoundedCornerShape(20.dp)).press { act.ask(title) }.padding(16.dp)) {
+                    Column(Modifier.weight(1f).fillMaxHeight().glass(RoundedCornerShape(20.dp)).press {
+                        if (title.contains("Scan", ignoreCase = true)) act.cameraScan() else act.ask(title)
+                    }.padding(16.dp)) {
                         Box(Modifier.size(36.dp).background(J.accentSoft, CircleShape), contentAlignment = Alignment.Center) { Icon(icon, J.accent, 18.dp) }
                         Spacer(Modifier.weight(1f).heightIn(min = 14.dp))
                         Text(title, J.button.copy(lineHeight = 19.sp), maxLines = 1)
@@ -443,6 +677,8 @@ private fun Composer(act: Actions) {
             cursorBrush = SolidColor(J.accent),
             keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send), keyboardActions = KeyboardActions(onSend = { send() }),
             decorationBox = { inner -> Box { if (text.isEmpty()) Text("Ask Jarvis", J.chat.copy(color = J.text3)); inner() } })
+        Spacer(Modifier.width(8.dp))
+        Round(Ico.camera, Color(0x12FFFFFF), J.text, act.cameraScan)
         Spacer(Modifier.width(8.dp))
         Round(Ico.mic, Color(0x12FFFFFF), J.text, act.listen)
         AnimatedVisibility(text.isNotBlank(), enter = fadeIn(tween(140)) + scaleIn(tween(140), 0.6f), exit = fadeOut(tween(140)) + scaleOut(tween(140), 0.6f)) {

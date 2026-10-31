@@ -1,5 +1,6 @@
 import QtQuick
 import QtQuick.Controls
+import QtQuick.Layouts
 import QtQuick.Dialogs
 import Jarvis
 
@@ -9,6 +10,8 @@ Item {
     property var attachments: []
     property string wake: "Hey Jarvis"
     property real latency: -1
+    property int userMessageCount: 0
+    readonly property bool hasChat: userMessageCount > 0
     readonly property bool wide: width > 1000  // (narrower, today folds into a strip above the conversation)
     readonly property real column: Math.min(760, talk.width - 2 * Theme.margin)
 
@@ -16,14 +19,66 @@ Item {
         Api.get("/api/conversation", c => {
             list.model = null  // (refilled detached, so a reload doesn't animate every message in)
             messages.clear()
-            for (const m of c.messages) add(m)
+            home.userMessageCount = 0
+            const raw = (c && c.messages) || []
+            for (let i = 0; i < raw.length; i++) {
+                const m = raw[i]
+                if (m.who === "tool") {
+                    let toolSteps = [m.label || Backend.toolLabel(m.text)]
+                    while (i + 1 < raw.length && raw[i + 1].who === "tool") {
+                        i++
+                        toolSteps.push(raw[i].label || Backend.toolLabel(raw[i].text))
+                    }
+                    messages.append({
+                        who: "activity",
+                        text: toolSteps.length > 1 ? ("Executed " + toolSteps.length + " steps") : ("Used 1 tool: " + toolSteps[0]),
+                        caption: "done",
+                        steps: toolSteps.join("\n"),
+                        time: m.time || Date.now() / 1000
+                    })
+                } else {
+                    add(m)
+                }
+            }
             list.model = messages
             list.positionViewAtEnd()
         })
     }
     function add(m) {
-        if (!["you", "jarvis", "tool", "system", "thinking", "image"].includes(m.who)) return
-        messages.append({ who: m.who, text: String(m.text || ""), caption: String(m.caption || ""), time: m.time || Date.now() / 1000 })
+        if (!["you", "jarvis", "tool", "activity", "system", "thinking", "image"].includes(m.who)) return
+        if (m.who === "you" || m.who === "jarvis" || m.who === "image") home.userMessageCount++
+
+        if (m.who === "tool" || m.who === "activity") {
+            const stepName = m.label || (m.who === "tool" ? Backend.toolLabel(m.text) : (m.steps || m.text))
+            if (messages.count > 0 && messages.get(messages.count - 1).who === "activity") {
+                const lastIdx = messages.count - 1
+                const prev = messages.get(lastIdx)
+                const currentSteps = prev.steps ? (prev.steps + "\n" + stepName) : stepName
+                messages.setProperty(lastIdx, "steps", currentSteps)
+                messages.setProperty(lastIdx, "text", "Working on it… (" + stepName + ")")
+                messages.setProperty(lastIdx, "caption", "working")
+                return
+            } else {
+                messages.append({
+                    who: "activity",
+                    text: m.text ? m.text : ("Working on it… (" + stepName + ")"),
+                    caption: m.caption || "working",
+                    steps: m.steps || stepName,
+                    time: m.time || Date.now() / 1000
+                })
+                return
+            }
+        }
+
+        if (m.who === "jarvis" && messages.count > 0 && messages.get(messages.count - 1).who === "activity") {
+            const lastIdx = messages.count - 1
+            const act = messages.get(lastIdx)
+            const count = act.steps ? act.steps.split("\n").length : 1
+            messages.setProperty(lastIdx, "caption", "done")
+            messages.setProperty(lastIdx, "text", count === 1 ? ("Used 1 tool: " + act.steps) : ("Executed " + count + " steps"))
+        }
+
+        messages.append({ who: m.who, text: String(m.text || ""), caption: String(m.caption || ""), steps: String(m.steps || ""), time: m.time || Date.now() / 1000 })
     }
     function send(text) {
         text = text.trim()
@@ -32,6 +87,7 @@ Item {
         Backend.send((text + " " + note).trim())
         attachments = []
     }
+    onVisibleChanged: if (visible) reload()
     Component.onCompleted: reload()
 
     ListModel { id: messages }
@@ -68,7 +124,7 @@ Item {
         Item {  // before anything is said: the reactor, a greeting and some ideas
             id: hero
             anchors { left: parent.left; right: parent.right; top: parent.top; topMargin: home.wide ? 46 : 116; bottom: composer.top; bottomMargin: 12 }
-            visible: messages.count === 0
+            visible: !home.hasChat
             opacity: visible ? 1 : 0
             Behavior on opacity { NumberAnimation { duration: 250 } }
 
@@ -103,7 +159,43 @@ Item {
                         : Backend.state === "listening" ? (Backend.listening ? "Go ahead, I'm listening" : "Paused")
                         : Backend.state === "speaking" ? `Say “${home.wake}” to cut in` : "On it"
                 }
-                Item { width: 1; height: 32 }
+                Item { width: 1; height: 18 }
+
+                // System notice banner (e.g. model quota notice) shown cleanly without hiding the home reactor
+                Rectangle {
+                    visible: messages.count > 0 && !home.hasChat
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    width: parent.width
+                    implicitHeight: Math.max(36, noticeRow.implicitHeight + 14)
+                    radius: Theme.radiusControl
+                    color: Theme.alpha(Theme.accent, 0.08)
+                    border.width: 1
+                    border.color: Theme.alpha(Theme.accent, 0.25)
+                    RowLayout {
+                        id: noticeRow
+                        anchors.fill: parent
+                        anchors.leftMargin: 12
+                        anchors.rightMargin: 8
+                        spacing: 8
+                        Icon { name: "bolt"; size: 16; color: Theme.accent }
+                        Txt {
+                            Layout.fillWidth: true
+                            kind: "small"
+                            color: Theme.text
+                            text: messages.count > 0 ? messages.get(messages.count - 1).text : ""
+                            wrapMode: Text.Wrap
+                        }
+                        IconButton {
+                            size: 24
+                            glyph: 12
+                            symbol: "close"
+                            tip: "Dismiss"
+                            onClicked: Api.post("/api/new", {}, () => home.reload())
+                        }
+                    }
+                }
+                Item { visible: messages.count > 0 && !home.hasChat; width: 1; height: 14 }
+
                 Grid {
                     id: ideas
                     width: parent.width
@@ -112,7 +204,7 @@ Item {
                     Repeater {
                         model: [["sun", "Brief me", "Weather and your schedule"], ["calendar", "What's due this week?", "From Google Classroom"],
                                 ["mail", "Any new emails?", "Your Gmail inbox"], ["screen", "What's on my screen?", "Jarvis takes a look"],
-                                ["timer", "Set a 10 minute timer", "With a notification"], ["image", "Paint a rainy city", "Make a picture"]]
+                                ["sparkle", "Best faceless niches", "RPM & retention breakdown"], ["image", "Paint a rainy city", "Make a picture"]]
                         Suggestion { required property var modelData; width: (ideas.width - (ideas.columns - 1) * ideas.spacing) / ideas.columns
                                      symbol: modelData[0]; title: modelData[1]; hint: modelData[2] }
                     }
@@ -123,7 +215,7 @@ Item {
         Pill {
             id: fresh
             anchors { top: parent.top; topMargin: home.wide ? 52 : 62; right: parent.right; rightMargin: (parent.width - home.column) / 2 }
-            visible: messages.count > 0
+            visible: home.hasChat
             implicitHeight: 36
             text: "New chat"
             symbol: "plus"
@@ -133,7 +225,7 @@ Item {
         ListView {
             id: list
             anchors { left: parent.left; right: parent.right; top: fresh.bottom; topMargin: home.wide ? 4 : 14; bottom: composer.top; bottomMargin: 4 }
-            visible: messages.count > 0
+            visible: home.hasChat
             clip: true
             model: messages
             topMargin: 8
@@ -217,7 +309,7 @@ Item {
         id: today
         x: home.wide ? home.width - width - 12 : (home.width - home.column) / 2
         y: 52
-        width: home.wide ? 300 : home.column - (fresh.visible ? fresh.width + 12 : 0)
+        width: home.wide ? 350 : home.column - (fresh.visible ? fresh.width + 12 : 0)
         height: home.wide ? home.height - y - 24 : 56
         compact: !home.wide
         latency: home.latency

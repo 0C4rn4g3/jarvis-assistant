@@ -143,10 +143,16 @@ ScrollPage {
                    onDone: v => page.set("checks", v) } }
         Row2 {
             Setting { label: "Check every"
-                Select { Layout.fillWidth: true; value: String(page.s.checks_every || 60); onPicked: v => page.set("checks_every", v)
+                Select { Layout.fillWidth: true; value: String(page.s.checks_every || 60); onPicked: v => page.set("checks_every", Number(v))
                          model: [{ value: "30", label: "30 minutes" }, { value: "60", label: "Hour" }, { value: "180", label: "3 hours" },
-                                 { value: "720", label: "12 hours" }] } }
+                                 { value: "720", label: "12 hours" }, { value: "1440", label: "Daily (24 hours)" }] } }
             Item { Layout.fillWidth: true }
+        }
+        Switches {
+            Toggle { Layout.fillWidth: true; text: "Notify out loud when checks find something"
+                     hint: "When off, Jarvis saves findings quietly in the background until you ask"
+                     checked: page.s.checks_notify !== false
+                     onToggled: page.set("checks_notify", checked) }
         }
     }
 

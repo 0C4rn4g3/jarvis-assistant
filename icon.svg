@@ -2,12 +2,12 @@
   <defs>
     <radialGradient id="g">
       <stop offset="0" stop-color="#fff"/>
-      <stop offset=".45" stop-color="#3fd8ff"/>
-      <stop offset="1" stop-color="#3fd8ff" stop-opacity="0"/>
+      <stop offset=".45" stop-color="#ff334b"/>
+      <stop offset="1" stop-color="#ff334b" stop-opacity="0"/>
     </radialGradient>
   </defs>
   <circle cx="32" cy="32" r="30" fill="#04080d"/>
-  <circle cx="32" cy="32" r="25" fill="none" stroke="#3fd8ff" stroke-width="3" stroke-dasharray="30 9"/>
-  <circle cx="32" cy="32" r="17" fill="none" stroke="#3fd8ff" stroke-opacity=".6" stroke-width="2"/>
+  <circle cx="32" cy="32" r="25" fill="none" stroke="#ff334b" stroke-width="3" stroke-dasharray="30 9"/>
+  <circle cx="32" cy="32" r="17" fill="none" stroke="#ff334b" stroke-opacity=".6" stroke-width="2"/>
   <circle cx="32" cy="32" r="13" fill="url(#g)"/>
 </svg>

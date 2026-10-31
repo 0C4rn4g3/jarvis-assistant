@@ -3,5 +3,14 @@ __pycache__/
 .cache-test/
 local_backends.py
 env
+.env
+.env.*
+.env.local
 *.log
 graphify-out/
+android/.idea/
+android/.gradle/
+android/app/build/
+*.pyc
+*.old
+test_*.json

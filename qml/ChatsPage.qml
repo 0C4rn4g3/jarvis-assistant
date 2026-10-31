@@ -8,6 +8,7 @@ import Jarvis
 Item {
     id: page
     signal opened()
+    signal deleted(string id)
     property var items: []
     property string current: ""
     property string selected: ""
@@ -170,7 +171,12 @@ Item {
                             text: "Click again to delete"
                             kind: "danger"
                             symbol: "trash"
-                            onClicked: Api.post(`/api/sessions/${page.selected}/delete`, {}, () => { Backend.toast("Conversation deleted", false); page.load() })
+                            onClicked: Api.post(`/api/sessions/${page.selected}/delete`, {}, () => {
+                                const delId = page.selected;
+                                Backend.toast("Conversation deleted", false);
+                                page.load();
+                                page.deleted(delId);
+                            })
                             Timer { id: undo; interval: 4000; onTriggered: page.confirming = false }
                         }
                         Pill { text: "Open"; kind: "primary"; symbol: "arrow-right"; visible: page.selected !== page.current

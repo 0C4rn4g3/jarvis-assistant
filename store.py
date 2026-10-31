@@ -36,12 +36,38 @@ DEFAULT_SETTINGS = {
     "calendar_reminders": True,    # a reminder ten minutes before each Google Calendar event
     "checks": [],                  # things Jarvis keeps an eye on in the background ("tell me if a payment fails"), one per line
     "checks_every": 60,            # minutes between those checks (each one is a few agent requests)
+    "checks_notify": True,         # announce check findings unprompted (when false, findings stay quiet until asked)
     "echo_cancel": False,          # PipeWire echo cancelling (Linux): talk over Jarvis on speakers (experimental)
     "learn_my_voice": True,        # learn from real wake-ups to ignore things that aren't you saying "Hey Jarvis"
     "safety": "ask",               # ask: risky commands and account changes wait for your yes; full: Jarvis just does them
     "setup_done": False,           # the first-run setup has been gone through (or skipped)
+    "jarvis_mode": "default",      # "default" or "game_designer"
+    "active_game_project": "legally-blind-driver",  # active game project
+    "anticipation_engine": True,          # proactive briefings and anticipation of meetings/docs/emails
+    "anticipation_meeting_lead_min": 20,  # minutes before a meeting to warn if doc is not open
+    "anticipation_urgent_emails": True,   # proactive heads-up on unread urgent emails
+    "lock_on_away": False,         # lock PC when leaving home geofence (False keeps PC active for remote phone access)
+    "keep_awake_when_away": True,  # prevents Windows sleep when away so phone can connect anytime
     # "backend model thinking-level", tried top to bottom; busy or rate-limited ones are skipped
+
     # the same for the other jobs (see brain.MODEL_JOBS); empty = Jarvis's built-in choice
+    "code_models": [
+        "antigravity claude-opus-4-6-thinking high",
+        "antigravity claude-sonnet-4-6 high",
+        "antigravity gemini-2.5-flash-thinking high",
+        "antigravity gemini-3.8-flash high",
+        "antigravity gemini-2.5-pro high",
+        "ollama qwen2.5:72b minimal",
+        "ollama qwen2.5:7b minimal",
+    ],
+    "phone_models": [
+        "antigravity gemini-3.5-flash-lite minimal",
+        "antigravity gemini-3-flash minimal",
+        "antigravity gemini-3.8-flash low",
+        "aistudio gemini-3.5-flash-lite minimal",
+        "ollama qwen2.5:7b minimal",
+    ],
+    "typesafe_api_key": "",        # TypeSafe AI Jev key for 70ms System 1 decisions
     "look_models": [], "point_models": [], "point_strong_models": [], "search_models": [], "image_models": [],
     "agent_models": [
         "antigravity gemini-3.8-flash low",  # (only when signed in with Google, on the Models page)
@@ -49,6 +75,8 @@ DEFAULT_SETTINGS = {
         "aistudio gemini-3.7-flash low",
         "aistudio gemini-3.5-flash-lite minimal",
         "aistudio gemini-3.1-flash-lite minimal",
+        "ollama qwen2.5:7b minimal",
+        "ollama qwen3.5:latest minimal",
     ],
 }
 
@@ -57,7 +85,7 @@ DEFAULT_PLUGINS = {
                  "tools": ["COMPOSIO_SEARCH_TOOLS", "COMPOSIO_MANAGE_CONNECTIONS", "COMPOSIO_MULTI_EXECUTE_TOOL", "COMPOSIO_GET_TOOL_SCHEMAS"]},
 }
 
-_lock = threading.Lock()
+_lock = threading.RLock()
 
 
 def read_json(path, default):
@@ -72,9 +100,22 @@ def write_json(path, data, private=False):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     tmp = f"{path}.tmp"
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600 if private else 0o644)
-    with os.fdopen(fd, "w") as f:
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=1)
-    os.replace(tmp, path)  # atomic: a crash never leaves half a file
+    for i in range(10):
+        try:
+            os.replace(tmp, path)  # atomic: a crash never leaves half a file
+            break
+        except (PermissionError, OSError):
+            if i == 9:
+                try:
+                    shutil.copyfile(tmp, path)
+                    if os.path.exists(tmp):
+                        os.remove(tmp)
+                    break
+                except Exception:
+                    raise
+            time.sleep(0.05 * (i + 1))
 
 
 # ---------------------------------------------------------------- settings
@@ -225,8 +266,16 @@ def pop_due(now=None):
 ROUTINES_FILE = os.path.join(DATA, "routines.json")
 
 
+DEFAULT_ROUTINES = {
+    "start my morning": "launch daily apps, queue morning playlist on Spotify, and read the morning briefing with calendar, Classroom deadlines, overnight trend scout hits, lead radar results, and system health",
+    "study mode": "close distractions, set a 50-minute focus timer, and open notes",
+    "game mode": "evict Ollama from VRAM for maximum GPU performance and enable whisper-follow mode"
+}
+
+
 def routines():
-    return read_json(ROUTINES_FILE, {})
+    saved = read_json(ROUTINES_FILE, {})
+    return {**DEFAULT_ROUTINES, **saved}
 
 
 def save_routine(name, steps):
@@ -442,10 +491,51 @@ class Sessions:
     def add(self, msg):
         with _lock:
             s = self.current
+            if msg.get("who") == "tool":
+                label = msg.get("label") or msg.get("text", "Tool")
+                if s["messages"] and s["messages"][-1].get("who") == "activity":
+                    act = s["messages"][-1]
+                    steps = act.get("steps", "").split("\n") if act.get("steps") else []
+                    steps.append(label)
+                    act["steps"] = "\n".join(steps)
+                    act["count"] = len(steps)
+                    act["text"] = f"Executed {len(steps)} steps"
+                    act["caption"] = "working"
+                    act["time"] = time.time()
+                else:
+                    s["messages"].append({
+                        "who": "activity",
+                        "text": f"Working on it… ({label})",
+                        "caption": "working",
+                        "steps": label,
+                        "count": 1,
+                        "time": time.time()
+                    })
+                self.save()
+                return
+
+            if msg.get("who") == "jarvis" and s["messages"] and s["messages"][-1].get("who") == "activity":
+                act = s["messages"][-1]
+                count = len(act.get("steps", "").split("\n")) if act.get("steps") else 1
+                act["caption"] = "done"
+                act["text"] = f"Used 1 tool: {act['steps']}" if count == 1 else f"Executed {count} steps"
+
+            if msg.get("who") == "system" and "stopped" in str(msg.get("text", "")).lower() and s["messages"] and s["messages"][-1].get("who") == "activity":
+                s["messages"][-1]["caption"] = "stopped"
+                s["messages"][-1]["text"] = "Stopped"
+
             s["messages"].append({**msg, "time": time.time()})
             if msg.get("who") == "you" and s["title"] == "New conversation":
                 s["title"] = msg["text"][:60]
         self.save()
+
+    def stop_activity(self):
+        with _lock:
+            s = self.current
+            if s["messages"] and s["messages"][-1].get("who") == "activity" and s["messages"][-1].get("caption") == "working":
+                s["messages"][-1]["caption"] = "stopped"
+                s["messages"][-1]["text"] = "Stopped"
+                self.save()
 
     def save(self, agent=None):
         with _lock:  # voice, agent and app threads all write to the current session

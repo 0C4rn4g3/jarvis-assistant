@@ -84,8 +84,11 @@ ICONS = {
                            '<path d="M6.5 7.5v9M17.5 9.5v.5a4 4 0 0 1-4 4h-3a4 4 0 0 0-4 2.5"/>'),
     "note": S.format('<path d="M6 3.5h8l4.5 4.5v11a1.5 1.5 0 0 1-1.5 1.5H6a1.5 1.5 0 0 1-1.5-1.5v-14A1.5 1.5 0 0 1 6 3.5z"/><path d="M13.5 3.5v5h5M8 12.5h8M8 16h5"/>'),
     "hash": S.format('<path d="M9.5 3.5 8 20.5M16 3.5l-1.5 17M4.5 9h16M3.5 15h16"/>'),
-    "check-square": S.format('<rect x="3.5" y="3.5" width="17" height="17" rx="4"/><path d="m8 12.2 2.8 2.8 5.7-5.7"/>'),
     "globe": S.format('<circle cx="12" cy="12" r="8.5"/><path d="M3.5 12h17M12 3.5c2.5 2.6 3.6 5.4 3.6 8.5s-1.1 5.9-3.6 8.5c-2.5-2.6-3.6-5.4-3.6-8.5s1.1-5.9 3.6-8.5z"/>'),
+    "pin": S.format('<path d="M16 3l5 5-2 2-3-1-3 3v4l-1 1-1-1v-4l-3-3-1 3-2-2 5-5zM12 17v4"/>'),
+    "radar": S.format('<circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5"/><circle cx="12" cy="12" r="1.5"/><path d="M12 12l6-6"/>'),
+    "briefcase": S.format('<rect x="3" y="6.5" width="18" height="13.5" rx="2.5"/><path d="M8 6.5V5a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v1.5M3 12h18"/>'),
+    "gamepad": S.format('<rect x="3" y="6" width="18" height="12" rx="4"/><path d="M7 12h4M9 10v4M15 11h.01M17 13h.01"/>'),
 }
 
 
@@ -130,15 +133,27 @@ class Backend(QObject):
         self._values = {}
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.poll)
-        self.timer.start(33)  # ~30 fps: the orb follows your voice
+        self.timer.start(250)  # Starts at low-power idle rate (4 fps)
         self.poll()
 
     def put(self, event):  # (the app's event queues call this: see jarvis.emit)
         self.event.emit(json.dumps(event, ensure_ascii=False, default=str))
 
     def poll(self):
-        values = {"state": self.shown[0], "level": round(getattr(self.live, "level", 0.0), 3), "listening": bool(self.live.mic),
-                  "mic": round(getattr(self.live, "raw_level", 0.0), 3)}
+        is_active = (self.shown[0] != "idle" or bool(self.live.mic))
+        desired_interval = 33 if is_active else 250
+        if self.timer.interval() != desired_interval:
+            self.timer.setInterval(desired_interval)
+
+        raw_mic = getattr(self.live, "raw_level", 0.0)
+        rounded_mic = round(raw_mic, 2) if is_active else (round(raw_mic, 1) if raw_mic > 0.1 else 0.0)
+
+        values = {
+            "state": self.shown[0],
+            "level": round(getattr(self.live, "level", 0.0), 3),
+            "listening": bool(self.live.mic),
+            "mic": rounded_mic
+        }
         if values != self._values:
             self._values = values
             self.changed.emit()
@@ -174,6 +189,9 @@ class Backend(QObject):
 
     @Slot()
     def stop(self):
+        self.shown[0] = "idle"
+        self._values["state"] = "idle"
+        self.changed.emit()
         self.request("", "/api/stop", "{}")
 
     @Slot()
@@ -217,9 +235,31 @@ class Window:
         self.engine.load(QUrl.fromLocalFile(os.path.join(HERE, "qml", "Main.qml")))
         if not self.engine.rootObjects():
             raise RuntimeError("the window couldn't be loaded (see the log)")
+        if show:
+            self.present()
 
     def present(self):
         self.backend.showRequested.emit()  # (safe from any thread)
+
+        def _show():
+            try:
+                import system
+                roots = self.engine.rootObjects()
+                if roots:
+                    w = roots[0]
+                    w.setVisible(True)
+                    w.show()
+                    w.raise_()
+                    w.requestActivate()
+                    if system.IS_WINDOWS:
+                        import win32gui, win32con
+                        hwnd = int(w.winId())
+                        if hwnd:
+                            win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
+                            win32gui.SetForegroundWindow(hwnd)
+            except Exception:
+                pass
+        QTimer.singleShot(0, _show)
 
 
 def show():

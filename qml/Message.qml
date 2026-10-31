@@ -1,4 +1,5 @@
 import QtQuick
+import QtQuick.Controls
 import QtQuick.Effects
 import Jarvis
 
@@ -12,7 +13,7 @@ Item {
     readonly property bool mine: who === "you"
     property real column: Math.min(width - 80, 760)
     property real rise: 0  // (the list animates new messages in with it)
-    readonly property int gap: who === "you" ? 20 : who === "jarvis" ? 10 : who === "system" ? 14 : who === "thinking" ? 4 : 8
+    readonly property int gap: who === "you" ? 20 : who === "jarvis" ? 10 : who === "system" ? 14 : who === "thinking" ? 4 : (who === "activity" || who === "tool") ? 6 : 8
     implicitHeight: body.implicitHeight + gap
     transform: Translate { y: m.rise }
 
@@ -26,7 +27,7 @@ Item {
         x: (m.width - m.column) / 2
         y: m.gap
         width: m.column
-        sourceComponent: m.who === "you" ? you : m.who === "jarvis" ? jarvis : m.who === "image" ? picture : m.who === "tool" ? tool
+        sourceComponent: m.who === "you" ? you : m.who === "jarvis" ? jarvis : m.who === "image" ? picture : (m.who === "tool" || m.who === "activity") ? activity
                        : m.who === "system" ? note : thinking
     }
 
@@ -34,6 +35,15 @@ Item {
         id: you
         Item {
             implicitHeight: bubble.height
+            IconButton {
+                anchors.right: bubble.left
+                anchors.rightMargin: 8
+                anchors.verticalCenter: bubble.verticalCenter
+                opacity: hover.hovered ? 1 : 0
+                Behavior on opacity { NumberAnimation { duration: Theme.fast } }
+                size: 28; glyph: 14; symbol: "copy"; tip: "Copy"
+                onClicked: Backend.copy(m.text)
+            }
             Rectangle {
                 id: bubble
                 anchors.right: parent.right
@@ -73,10 +83,96 @@ Item {
         }
     }
     Component {
-        id: tool
+        id: activity
         Item {
-            implicitHeight: 28
-            Chip { x: 36; implicitHeight: 28; enabled: false; dot: "working"; text: Backend.toolLabel(m.text) }
+            id: actItem
+            property bool expanded: false
+            readonly property var stepList: {
+                var raw = (typeof model !== "undefined" && model && model.steps) ? model.steps : ""
+                return raw ? raw.split("\n") : []
+            }
+            readonly property bool isWorking: m.caption === "working"
+            implicitHeight: actCol.implicitHeight
+
+            Column {
+                id: actCol
+                x: 36
+                spacing: 8
+                width: Math.min(m.column - 36, 560)
+
+                AbstractButton {
+                    id: pillBtn
+                    hoverEnabled: true
+                    focusPolicy: Qt.NoFocus
+                    implicitHeight: 32
+                    implicitWidth: pillRow.implicitWidth + 24
+                    background: Rectangle {
+                        radius: 16
+                        color: pillBtn.hovered ? Theme.glassHover : Theme.glass
+                        border.width: 1
+                        border.color: pillBtn.hovered ? Theme.strokeStrong : Theme.stroke
+                        Behavior on color { ColorAnimation { duration: Theme.fast } }
+                        Behavior on border.color { ColorAnimation { duration: Theme.fast } }
+                    }
+                    contentItem: Item {
+                        Row {
+                            id: pillRow
+                            anchors.centerIn: parent
+                            spacing: 8
+                            StatusDot {
+                                status: actItem.isWorking ? "working" : "ok"
+                                anchors.verticalCenter: parent.verticalCenter
+                            }
+                            Text {
+                                text: m.text ? m.text : Backend.toolLabel(m.text)
+                                font.family: Theme.font
+                                font.pixelSize: Theme.px(13)
+                                font.weight: 500
+                                color: pillBtn.hovered ? Theme.text : Theme.text2
+                                anchors.verticalCenter: parent.verticalCenter
+                            }
+                            Icon {
+                                visible: actItem.stepList.length > 0
+                                name: actItem.expanded ? "chevron" : "chevron-right"
+                                size: 14
+                                color: Theme.text3
+                                anchors.verticalCenter: parent.verticalCenter
+                            }
+                        }
+                    }
+                    onClicked: if (actItem.stepList.length > 0) actItem.expanded = !actItem.expanded
+                }
+
+                Column {
+                    id: stepsCol
+                    visible: actItem.expanded && actItem.stepList.length > 0
+                    spacing: 6
+                    leftPadding: 12
+                    topPadding: 2
+                    bottomPadding: 4
+
+                    Repeater {
+                        model: actItem.stepList
+                        Row {
+                            spacing: 10
+                            Rectangle {
+                                width: 5
+                                height: 5
+                                radius: 2.5
+                                color: Theme.accent
+                                anchors.verticalCenter: parent.verticalCenter
+                            }
+                            Text {
+                                text: modelData
+                                font.family: Theme.font
+                                font.pixelSize: Theme.px(12.5)
+                                color: Theme.text2
+                                anchors.verticalCenter: parent.verticalCenter
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
     Component {

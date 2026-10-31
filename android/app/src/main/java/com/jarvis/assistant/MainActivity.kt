@@ -4,6 +4,10 @@ import android.content.Intent
 import android.graphics.Color
 import android.net.Uri
 import android.os.Bundle
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.util.Base64
+import java.io.ByteArrayOutputStream
 import android.speech.RecognizerIntent
 import android.speech.tts.TextToSpeech
 import androidx.activity.ComponentActivity
@@ -36,6 +40,7 @@ class MainActivity : ComponentActivity() {
     private var nextMsg = 1
     private val messages = mutableStateListOf<Msg>()
     private var ui by mutableStateOf(Ui())
+    private var todayInfo by mutableStateOf(TodayInfo())
     private val waiting = mutableMapOf<Int, Boolean>()  // request id -> it was spoken (so the reply is read out)
     private val held = mutableListOf<Pair<String, Boolean>>()  // asked while still connecting (back from the speech screen)
     private val http = OkHttpClient.Builder().readTimeout(60, TimeUnit.SECONDS).build()
@@ -44,6 +49,21 @@ class MainActivity : ComponentActivity() {
     private val scan = registerForActivityResult(ScanContract()) { result -> result.contents?.let { pairWith(it) } }
     private val listen = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
         result.data?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)?.firstOrNull()?.let { ask(it, spoken = true) }
+    }
+    private val takePicture = registerForActivityResult(ActivityResultContracts.TakePicturePreview()) { bitmap ->
+        if (bitmap != null) uploadCameraScan(bitmap)
+    }
+    private val pickImage = registerForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+        if (uri != null) {
+            try {
+                contentResolver.openInputStream(uri)?.use { stream ->
+                    val bitmap = BitmapFactory.decodeStream(stream)
+                    if (bitmap != null) uploadCameraScan(bitmap)
+                }
+            } catch (e: Exception) {
+                say("Failed to read image: ${e.message}", Who.NOTE)
+            }
+        }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -67,6 +87,23 @@ class MainActivity : ComponentActivity() {
                 refresh()
             },
             unpair = { link.unpair() },
+            mediaAction = { link.send(JSONObject().put("op", "media_action").put("action", it)) },
+            refreshToday = { link.send(JSONObject().put("op", "get_today")) },
+            scanLeads = { link.send(JSONObject().put("op", "scan_leads").put("niche", it)) },
+            cameraScan = {
+                try {
+                    takePicture.launch(null)
+                } catch (e: Exception) {
+                    say("Camera error: ${e.message}", Who.NOTE)
+                }
+            },
+            pickScan = {
+                try {
+                    pickImage.launch("image/*")
+                } catch (e: Exception) {
+                    say("Picker error: ${e.message}", Who.NOTE)
+                }
+            },
         )
         setContent { JarvisApp(ui, actions) }
         fromLink(intent)
@@ -113,12 +150,14 @@ class MainActivity : ComponentActivity() {
             working = waiting.isNotEmpty() && link.state == State.ONLINE,
             key = prefs.getString("gemini_key", "") ?: "",
             version = BuildConfig.VERSION_NAME,
+            today = todayInfo,
         )
     }
 
     private fun showState(state: State, detail: String) {
         if (state == State.ONLINE && detail.isNotBlank()) prefs.edit().putString("pc_name", detail).apply()
         refresh(if (state == State.ONLINE) "" else detail)
+        if (state == State.ONLINE) link.send(JSONObject().put("op", "get_today"))
         if (state != State.CONNECTING) held.toList().also { held.clear() }.forEach { (text, spoken) -> send(text, spoken) }
     }
 
@@ -131,6 +170,34 @@ class MainActivity : ComponentActivity() {
     private fun ask(text: String, spoken: Boolean) {
         say(text, Who.YOU)
         if (link.state == State.CONNECTING) held.add(text to spoken) else send(text, spoken)
+    }
+
+    private fun uploadCameraScan(bitmap: Bitmap, prompt: String = "") {
+        say("📷 Beaming camera scan to PC…", Who.YOU)
+        val stream = ByteArrayOutputStream()
+        val maxDim = 1600
+        val scaled = if (bitmap.width > maxDim || bitmap.height > maxDim) {
+            val ratio = minOf(maxDim.toFloat() / bitmap.width, maxDim.toFloat() / bitmap.height)
+            Bitmap.createScaledBitmap(bitmap, (bitmap.width * ratio).toInt(), (bitmap.height * ratio).toInt(), true)
+        } else {
+            bitmap
+        }
+        scaled.compress(Bitmap.CompressFormat.JPEG, 80, stream)
+        val bytes = stream.toByteArray()
+        val b64 = Base64.encodeToString(bytes, Base64.NO_WRAP)
+        val id = nextId++
+        val msg = JSONObject()
+            .put("op", "camera_scan")
+            .put("id", id)
+            .put("image", b64)
+            .put("prompt", prompt)
+            .put("mode", "auto")
+        if (link.send(msg)) {
+            waiting[id] = false
+            refresh()
+        } else {
+            say("PC offline: Camera scan cannot be beamed right now.", Who.NOTE)
+        }
     }
 
     private fun send(text: String, spoken: Boolean) {
@@ -154,6 +221,73 @@ class MainActivity : ComponentActivity() {
             "stopped" -> {
                 waiting.clear()
                 say("Stopped.", Who.NOTE)
+            }
+            "today_sync" -> {
+                val media = m.optJSONObject("media")
+                val remindersArr = m.optJSONArray("reminders")
+                val stats = m.optJSONObject("stats")
+                val jobs = m.optJSONObject("jobs")
+
+                val cur = todayInfo
+                val newMediaTitle = media?.optString("title") ?: cur.mediaTitle
+                val newMediaArtist = media?.optString("artist") ?: cur.mediaArtist
+                val newMediaStatus = media?.optString("status") ?: cur.mediaStatus
+
+                val newReminders = if (remindersArr != null) {
+                    val list = mutableListOf<String>()
+                    for (i in 0 until remindersArr.length()) {
+                        val r = remindersArr.optJSONObject(i)
+                        val text = r?.optString("text") ?: ""
+                        val whenStr = r?.optString("when") ?: ""
+                        if (text.isNotBlank()) list.add(if (whenStr.isNotBlank()) "$whenStr — $text" else text)
+                    }
+                    list
+                } else cur.reminders
+
+                val newCpu = stats?.optInt("cpu") ?: cur.cpu
+                val newRam = if (stats != null) "${stats.optDouble("ram_used_gb")} / ${stats.optDouble("ram_total_gb")} GB" else cur.ramGb
+                val newGaming = stats?.optBoolean("gaming") ?: cur.gaming
+
+                val newJobText = jobs?.optString("text") ?: cur.jobText
+                val newJobTime = jobs?.optString("time") ?: cur.jobTime
+
+                val leadsArr = m.optJSONArray("leads")
+                val newLeads = if (leadsArr != null) {
+                    val list = mutableListOf<LeadItem>()
+                    for (i in 0 until leadsArr.length()) {
+                        val obj = leadsArr.optJSONObject(i) ?: continue
+                        val issuesList = mutableListOf<String>()
+                        val issuesArr = obj.optJSONArray("issues")
+                        if (issuesArr != null) {
+                            for (j in 0 until issuesArr.length()) {
+                                val s = issuesArr.optString(j)
+                                if (s.isNotBlank()) issuesList.add(s)
+                            }
+                        }
+                        list.add(LeadItem(
+                            name = obj.optString("name"),
+                            url = obj.optString("url"),
+                            score = obj.optInt("score"),
+                            issues = issuesList,
+                            phone = obj.optString("phone"),
+                            mapsUrl = obj.optString("maps_url")
+                        ))
+                    }
+                    list
+                } else cur.leads
+
+                todayInfo = TodayInfo(
+                    mediaTitle = newMediaTitle,
+                    mediaArtist = newMediaArtist,
+                    mediaStatus = newMediaStatus,
+                    reminders = newReminders,
+                    cpu = newCpu,
+                    ramGb = newRam,
+                    gaming = newGaming,
+                    jobText = newJobText,
+                    jobTime = newJobTime,
+                    leads = newLeads
+                )
             }
             "error" -> say(m.optString("error"), Who.NOTE)
         }

@@ -27,7 +27,8 @@ def have(program):
 def run(args, timeout=15, env=None):
     """A short command's output (stdout and stderr), '' if it isn't installed."""
     try:
-        r = subprocess.run(args, capture_output=True, text=True, timeout=timeout, env=env)
+        r = subprocess.run(args, capture_output=True, text=True, timeout=timeout, env=env,
+                           creationflags=subprocess.CREATE_NO_WINDOW if IS_WINDOWS else 0)
     except (OSError, subprocess.TimeoutExpired):
         return ""
     return (r.stdout + r.stderr).strip()
@@ -188,6 +189,46 @@ def screenshot():
     return shot
 
 
+def screen_peek_jpeg(max_w: int = 640, max_h: int = 360, quality: int = 40) -> bytes:
+    """Downsamples screen capture to low-resolution JPEG for phone screen peek monitoring."""
+    try:
+        from PySide6.QtWidgets import QApplication
+        from PySide6.QtGui import QGuiApplication
+        from PySide6.QtCore import QBuffer, QByteArray, QIODevice, Qt
+        import sys
+        _app = QApplication.instance() or QApplication(sys.argv)
+        screen = QGuiApplication.primaryScreen()
+        if screen:
+            pix = screen.grabWindow(0)
+            if not pix.isNull():
+                scaled = pix.scaled(max_w, max_h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                out = QByteArray()
+                buf = QBuffer(out)
+                buf.open(QIODevice.WriteOnly)
+                scaled.save(buf, "JPG", quality)
+                return bytes(out)
+    except Exception:
+        pass
+    try:
+        raw_shot = screenshot()
+        if raw_shot:
+            from PySide6.QtCore import QBuffer, QByteArray, QIODevice, Qt
+            from PySide6.QtGui import QImage
+            img = QImage()
+            img.loadFromData(raw_shot)
+            if not img.isNull():
+                scaled = img.scaled(max_w, max_h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                out = QByteArray()
+                buf = QBuffer(out)
+                buf.open(QIODevice.WriteOnly)
+                scaled.save(buf, "JPG", quality)
+                return bytes(out)
+            return raw_shot
+    except Exception:
+        pass
+    return b""
+
+
 def _screenshot():
     if KDE and WAYLAND and os.path.exists(SHOT_HELPER):  # ~30 ms through KWin
         try:
@@ -206,11 +247,33 @@ def _screenshot():
             return _from_file(["grim"])
         if GNOME and have("gnome-screenshot"):
             return _from_file(["gnome-screenshot", "-f"])
-    import mss  # Windows and X11
-    from PySide6.QtGui import QImage
-    with mss.mss() as m:
-        shot = m.grab(m.monitors[0])
-        return _jpeg(bytes(shot.bgra), shot.width, shot.height, shot.width * 4, QImage.Format_ARGB32)
+    try:
+        from PySide6.QtWidgets import QApplication
+        from PySide6.QtGui import QGuiApplication
+        from PySide6.QtCore import QBuffer, QByteArray, QIODevice
+        import sys
+        _app = QApplication.instance() or QApplication(sys.argv)
+        screen = QGuiApplication.primaryScreen()
+        if screen:
+            pix = screen.grabWindow(0)
+            if not pix.isNull():
+                img = pix.toImage()
+                out = QByteArray()
+                buf = QBuffer(out)
+                buf.open(QIODevice.WriteOnly)
+                img.save(buf, "JPG", 85)
+                return bytes(out)
+    except Exception:
+        pass
+    try:
+        import mss  # Windows and X11
+        from PySide6.QtGui import QImage
+        with mss.mss() as m:
+            shot = m.grab(m.monitors[0])
+            return _jpeg(bytes(shot.bgra), shot.width, shot.height, shot.width * 4, QImage.Format_ARGB32)
+    except Exception:
+        pass
+    return None
 
 
 def capture_region():
@@ -402,6 +465,47 @@ def active_app():
     return (w.getAppName() or "").removesuffix(".exe") if w else ""
 
 
+def active_window_context():
+    """Provides foreground window metadata: app name, window title, and active file/URL hints."""
+    try:
+        app = active_app()
+        title = ""
+        if IS_WINDOWS:
+            try:
+                import ctypes
+                u32 = ctypes.windll.user32
+                hwnd = u32.GetForegroundWindow()
+                if hwnd:
+                    buf = ctypes.create_unicode_buffer(512)
+                    u32.GetWindowTextW(hwnd, buf, 512)
+                    title = buf.value.strip()
+            except Exception:
+                pass
+        if not title:
+            try:
+                import pywinctl
+                w = pywinctl.getActiveWindow()
+                if w:
+                    title = (w.title or "").strip()
+                    if not app:
+                        app = (w.getAppName() or "").removesuffix(".exe")
+            except Exception:
+                pass
+
+        if not app and not title:
+            return ""
+
+        file_hint = ""
+        if title:
+            parts = [p.strip() for p in title.split(" - ")]
+            if len(parts) >= 2 and ("." in parts[0] or "Code" in parts[-1] or "IntelliJ" in parts[-1]):
+                file_hint = f" | Active File: {parts[0]}"
+
+        return f"[Foreground App: {app or 'Desktop'}{file_hint} | Window: {title[:120]}]"
+    except Exception:
+        return ""
+
+
 def list_windows():
     if KDE and WAYLAND and have("kdotool"):  # one call for all of them (each kdotool call costs ~0.3 s)
         out = _kdo("search", ".", "getwindowclassname", "%@", "getwindowname", "%@").splitlines()
@@ -494,9 +598,26 @@ def shell(command, timeout=30):
     args = (["powershell", "-NoProfile", "-NonInteractive", "-Command", command] if IS_WINDOWS else ["bash", "-lc", command])
     with tempfile.TemporaryFile() as log:
         r = subprocess.run(args, stdout=log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, timeout=timeout,
+                           creationflags=subprocess.CREATE_NO_WINDOW if IS_WINDOWS else 0,
                            **({} if IS_WINDOWS else {"start_new_session": True}))
         log.seek(0)
         return r.returncode, log.read().decode(errors="replace").strip()
+
+
+def keep_system_awake(enable: bool = True):
+    """Prevents system sleep/standby while allowing display power save (Windows Away Mode)."""
+    if IS_WINDOWS:
+        import ctypes
+        ES_CONTINUOUS = 0x80000000
+        ES_SYSTEM_REQUIRED = 0x00000001
+        ES_AWAYMODE_REQUIRED = 0x00000040
+        try:
+            if enable:
+                ctypes.windll.kernel32.SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_AWAYMODE_REQUIRED)
+            else:
+                ctypes.windll.kernel32.SetThreadExecutionState(ES_CONTINUOUS)
+        except Exception:
+            pass
 
 
 def similar_programs(name):
@@ -598,9 +719,164 @@ def paste_text(text):
     return problem
 
 
+_art_cache = {"key": None, "art": ""}
+
+
+def _clean_windows_app_name(app_id):
+    lower = app_id.lower()
+    for m in ("spotify", "opera", "chrome", "brave", "edge", "firefox", "vlc", "applemusic", "tidal", "deezer"):
+        if m in lower:
+            return m.capitalize() if m != "edge" else "Edge"
+    part = app_id.split("!")[-1].split(".exe")[0].split(".")[-1]
+    return part.strip().title() or "Media"
+
+
+def _windows_now_playing():
+    try:
+        import winsdk.windows.media.control as wmc
+        import winsdk.windows.storage.streams as streams
+    except ImportError:
+        return {}
+
+    async def _fetch():
+        try:
+            mgr = await wmc.GlobalSystemMediaTransportControlsSessionManager.request_async()
+            sessions = list(mgr.get_sessions())
+            if not sessions:
+                return {}
+            music_apps = ("spotify", "applemusic", "tidal", "deezer", "foobar", "musicbee")
+            scored = []
+            for s in sessions:
+                pb = s.get_playback_info()
+                st = pb.playback_status if pb else 0
+                app_id = s.source_app_user_model_id or ""
+                is_music = any(m in app_id.lower() for m in music_apps)
+                if st == 4:
+                    score = 100 if is_music else 80
+                elif st == 5:
+                    score = 50 if is_music else 20
+                else:
+                    score = 0
+                scored.append((score, s, st, app_id))
+            scored.sort(key=lambda x: x[0], reverse=True)
+            best_score, best_session, pb_status, app_id = scored[0]
+            if best_score == 0 and not (best_session and app_id):
+                return {}
+            props = await best_session.try_get_media_properties_async()
+            title = props.title or ""
+            artist = props.artist or props.album_artist or ""
+            if not title and not artist:
+                return {}
+            status = "Playing" if pb_status == 4 else "Paused" if pb_status == 5 else "Stopped"
+            art_key = f"{title}:{artist}"
+            if _art_cache.get("key") == art_key and _art_cache.get("art"):
+                art = _art_cache["art"]
+            else:
+                art = ""
+                if props.thumbnail:
+                    try:
+                        stream = await props.thumbnail.open_read_async()
+                        if stream and stream.size > 0:
+                            reader = streams.DataReader(stream)
+                            await reader.load_async(stream.size)
+                            buf = bytearray(stream.size)
+                            reader.read_bytes(buf)
+                            import base64
+                            art = "data:image/jpeg;base64," + base64.b64encode(buf).decode()
+                            _art_cache["key"] = art_key
+                            _art_cache["art"] = art
+                    except Exception:
+                        pass
+            tl = best_session.get_timeline_properties()
+            length = tl.end_time.total_seconds() if tl and hasattr(tl.end_time, "total_seconds") else 0
+            return {
+                "player": app_id,
+                "app": _clean_windows_app_name(app_id),
+                "status": status,
+                "title": title,
+                "artist": artist,
+                "art": art,
+                "length": length
+            }
+        except Exception:
+            return {}
+
+    try:
+        import asyncio
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+        if loop and loop.is_running():
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor(1) as pool:
+                return pool.submit(asyncio.run, _fetch()).result()
+        return asyncio.run(_fetch())
+    except Exception:
+        return {}
+
+
+def _windows_media(action):
+    try:
+        import winsdk.windows.media.control as wmc
+    except ImportError:
+        return False
+
+    async def _act():
+        try:
+            mgr = await wmc.GlobalSystemMediaTransportControlsSessionManager.request_async()
+            sessions = list(mgr.get_sessions())
+            if not sessions:
+                return False
+            music_apps = ("spotify", "applemusic", "tidal", "deezer", "foobar", "musicbee")
+            scored = []
+            for s in sessions:
+                pb = s.get_playback_info()
+                st = pb.playback_status if pb else 0
+                app_id = s.source_app_user_model_id or ""
+                is_music = any(m in app_id.lower() for m in music_apps)
+                if st == 4:
+                    score = 100 if is_music else 80
+                elif st == 5:
+                    score = 50 if is_music else 20
+                else:
+                    score = 0
+                scored.append((score, s))
+            scored.sort(key=lambda x: x[0], reverse=True)
+            target = scored[0][1]
+            if action == "PlayPause":
+                await target.try_toggle_play_pause_async()
+                return True
+            elif action == "Next":
+                await target.try_skip_next_async()
+                return True
+            elif action == "Previous":
+                await target.try_skip_previous_async()
+                return True
+        except Exception:
+            return False
+        return False
+
+    try:
+        import asyncio
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+        if loop and loop.is_running():
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor(1) as pool:
+                return pool.submit(asyncio.run, _act()).result()
+        return asyncio.run(_act())
+    except Exception:
+        return False
+
+
 def now_playing():
-    """The media player that's playing (or the first one): {player, app, status, title, artist, art}. Linux (MPRIS) only."""
-    if IS_WINDOWS or not have("busctl"):
+    """The media player that's playing (or the first one): {player, app, status, title, artist, art}."""
+    if IS_WINDOWS:
+        return _windows_now_playing()
+    if not have("busctl"):
         return {}
     out = run(["busctl", "--user", "--json=short", "call", "org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus", "ListNames"], 5)
     try:
@@ -629,6 +905,11 @@ def now_playing():
 
 def media(action):
     """PlayPause, Next or Previous for the current player (media keys where MPRIS isn't available)."""
+    if IS_WINDOWS:
+        if _windows_media(action):
+            return
+        press_keys({"PlayPause": "XF86AudioPlay", "Next": "XF86AudioNext", "Previous": "XF86AudioPrev"}[action])
+        return
     player = now_playing().get("player")
     if player:
         run(["busctl", "--user", "call", player, "/org/mpris/MediaPlayer2", "org.mpris.MediaPlayer2.Player", action], 5)
@@ -639,8 +920,19 @@ def media(action):
 def system_stats():
     import psutil
     mem, disk = psutil.virtual_memory(), psutil.disk_usage(os.path.expanduser("~"))
-    return {"cpu": round(psutil.cpu_percent(interval=None), 1), "mem_used": mem.total - mem.available, "mem_total": mem.total,
+    stats = {"cpu": round(psutil.cpu_percent(interval=None), 1), "mem_used": mem.total - mem.available, "mem_total": mem.total,
             "disk_used": disk.used, "disk_total": disk.total, "uptime": time.time() - psutil.boot_time()}
+    try:
+        import hardware
+        gpu = hardware.get_gpu_info()
+        if gpu.get("detected"):
+            stats["gpu_name"] = gpu.get("name", "")
+            stats["gpu_vendor"] = gpu.get("vendor", "")
+            stats["gpu_vram_total"] = gpu.get("vram_total_mb", 0)
+            stats["gpu_vram_used"] = gpu.get("vram_total_mb", 0) - gpu.get("vram_free_mb", 0)
+    except Exception:
+        pass
+    return stats
 
 
 def set_autostart(enabled, command):
@@ -706,7 +998,9 @@ class WindowsAccessibility:
             time.sleep(0.2)
         if not wins:
             return {"error": f"no window for '{cmd['app']}'"}
-        controls = [c for c in wins[0].descendants() if c.element_info.control_type in self.INTERACTIVE and c.window_text()]
+        depth = 4 if any(b in want for b in ("chrome", "msedge", "brave", "firefox", "discord", "electron")) else None
+        kwargs = {"depth": depth} if depth else {}
+        controls = [c for c in wins[0].descendants(**kwargs) if c.element_info.control_type in self.INTERACTIVE and c.window_text()]
         names = [f"{c.element_info.control_type}: {c.window_text()}" for c in controls]
 
         def lookup(name):
@@ -746,3 +1040,104 @@ def _process_name(pid):
 
 
 accessibility = WindowsAccessibility() if IS_WINDOWS else LinuxAccessibility()
+
+
+# ---------------------------------------------------------------- audio ducking & device switching
+_ducked_sessions = {}
+_duck_lock = threading.Lock()
+
+
+def duck_media(duck=True):
+    """Lower volume of playing media/apps by ~75% while speaking/listening, or restore it."""
+    if not IS_WINDOWS:
+        return
+    def _run():
+        with _duck_lock:
+            try:
+                import comtypes
+                comtypes.CoInitialize()
+                from pycaw.pycaw import AudioUtilities, ISimpleAudioVolume
+                my_pid = os.getpid()
+                if duck:
+                    sessions = AudioUtilities.GetAllSessions()
+                    for s in sessions:
+                        if s.Process and s.Process.pid != my_pid and s.Process.name().lower() not in ("python.exe", "pythonw.exe", "audiodg.exe"):
+                            try:
+                                v = s._ctl.QueryInterface(ISimpleAudioVolume)
+                                cur = v.GetMasterVolume()
+                                if s.Process.pid not in _ducked_sessions and cur > 0.1:
+                                    _ducked_sessions[s.Process.pid] = (v, cur)
+                                    v.SetMasterVolume(max(0.05, cur * 0.25), None)
+                            except Exception:
+                                pass
+                else:
+                    for pid, (v, orig) in list(_ducked_sessions.items()):
+                        try:
+                            v.SetMasterVolume(orig, None)
+                        except Exception:
+                            pass
+                    _ducked_sessions.clear()
+            except Exception:
+                pass
+    threading.Thread(target=_run, daemon=True).start()
+
+
+def list_audio_devices():
+    """List active audio output (playback) devices."""
+    if not IS_WINDOWS:
+        return []
+    try:
+        import comtypes
+        comtypes.CoInitialize()
+        from pycaw.pycaw import AudioUtilities, AudioDeviceState
+        devices = [d for d in AudioUtilities.GetAllDevices() if d.state == AudioDeviceState.Active and "{0.0.0." in d.id]
+        curr_id = AudioUtilities.GetSpeakers().id
+        return [{"name": d.FriendlyName, "id": d.id, "default": d.id == curr_id} for d in devices]
+    except Exception as e:
+        return [{"error": str(e)}]
+
+
+def switch_audio_device(name=""):
+    """Switch default audio playback device to the one matching `name` (e.g. 'headphones', 'speakers')."""
+    if not IS_WINDOWS:
+        return {"error": "audio device switching is only supported on Windows"}
+    try:
+        import comtypes, comtypes.client
+        from comtypes import GUID, COMMETHOD, HRESULT
+        from ctypes import c_wchar_p, c_int, c_void_p
+        from pycaw.pycaw import AudioUtilities, AudioDeviceState
+        comtypes.CoInitialize()
+
+        class IPolicyConfig(comtypes.IUnknown):
+            _iid_ = GUID('{f8679f50-850a-41cf-9c72-430f290290c8}')
+            _methods_ = [
+                COMMETHOD([], HRESULT, 'GetMixFormat', (['in'], c_wchar_p, 'devId'), (['out'], c_void_p, 'pFormat')),
+                COMMETHOD([], HRESULT, 'GetDeviceFormat', (['in'], c_wchar_p, 'devId'), (['in'], c_int, 'bDefault'), (['out'], c_void_p, 'pFormat')),
+                COMMETHOD([], HRESULT, 'ResetDeviceFormat', (['in'], c_wchar_p, 'devId')),
+                COMMETHOD([], HRESULT, 'SetDeviceFormat', (['in'], c_wchar_p, 'devId'), (['in'], c_void_p, 'p1'), (['in'], c_void_p, 'p2')),
+                COMMETHOD([], HRESULT, 'GetProcessingPeriod', (['in'], c_wchar_p, 'devId'), (['in'], c_int, 'bDefault'), (['out'], c_void_p, 'p1'), (['out'], c_void_p, 'p2')),
+                COMMETHOD([], HRESULT, 'SetProcessingPeriod', (['in'], c_wchar_p, 'devId'), (['in'], c_void_p, 'p1')),
+                COMMETHOD([], HRESULT, 'GetShareMode', (['in'], c_wchar_p, 'devId'), (['out'], c_void_p, 'pMode')),
+                COMMETHOD([], HRESULT, 'SetShareMode', (['in'], c_wchar_p, 'devId'), (['in'], c_void_p, 'mode')),
+                COMMETHOD([], HRESULT, 'GetPropertyValue', (['in'], c_wchar_p, 'devId'), (['in'], c_void_p, 'key'), (['out'], c_void_p, 'pv')),
+                COMMETHOD([], HRESULT, 'SetPropertyValue', (['in'], c_wchar_p, 'devId'), (['in'], c_void_p, 'key'), (['in'], c_void_p, 'pv')),
+                COMMETHOD([], HRESULT, 'SetDefaultEndpoint', (['in'], c_wchar_p, 'devId'), (['in'], c_int, 'role')),
+                COMMETHOD([], HRESULT, 'SetEndpointVisibility', (['in'], c_wchar_p, 'devId'), (['in'], c_int, 'bVisible')),
+            ]
+
+        devices = [d for d in AudioUtilities.GetAllDevices() if d.state == AudioDeviceState.Active and "{0.0.0." in d.id]
+        curr_id = AudioUtilities.GetSpeakers().id
+        if not name or name.strip().lower() == "list":
+            return {"devices": [{"name": d.FriendlyName, "default": d.id == curr_id} for d in devices]}
+        target = name.strip().lower()
+        matched = next((d for d in devices if target in d.FriendlyName.lower()), None)
+        if not matched:
+            names = [d.FriendlyName for d in devices]
+            return {"error": f"No audio device matching '{name}'. Available: {', '.join(names)}"}
+        policy = comtypes.client.CreateObject(GUID('{870AF99C-171D-4F9E-AF0D-E63DF40C2BC9}'), interface=IPolicyConfig)
+        for role in (0, 1, 2):
+            policy.SetDefaultEndpoint(matched.id, role)
+        return {"result": f"Default audio switched to {matched.FriendlyName}"}
+    except Exception as e:
+        return {"error": f"Failed to switch audio device: {e}"}
+

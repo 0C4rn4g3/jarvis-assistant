@@ -16,8 +16,9 @@ AbstractButton {
         radius: height / 2
         color: c.active ? Theme.accentSoft : c.hovered ? Theme.glassHover : Theme.glass
         border.width: 1
-        border.color: c.active ? Theme.alpha(Theme.accent, 0.3) : Theme.stroke
+        border.color: c.active ? Theme.alpha(Theme.accent, 0.45) : c.hovered ? Theme.strokeStrong : Theme.stroke
         Behavior on color { ColorAnimation { duration: Theme.fast } }
+        Behavior on border.color { ColorAnimation { duration: Theme.fast } }
     }
     contentItem: Item {
         Row {
